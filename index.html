@@ -196,6 +196,8 @@ section[hidden]{display:none}
 .task{display:grid;grid-template-columns:auto 1fr auto;gap:12px;align-items:center;padding:12px 14px;border-bottom:1px solid var(--line)}
 .task:last-child{border-bottom:0}
 .task.over{box-shadow:inset 3px 0 0 var(--neg)}
+.task.leaving{animation:leave .5s ease forwards;pointer-events:none}
+@keyframes leave{0%,45%{opacity:1;transform:none;background:var(--pos-soft)}100%{opacity:0;transform:translateX(40px);background:var(--pos-soft)}}
 .check{width:26px;height:26px;border-radius:50%;border:2px solid var(--line);background:var(--surface);display:grid;place-items:center;padding:0}
 .check:hover{border-color:var(--pos)}
 .check svg{width:14px;height:14px;stroke:#fff;opacity:0}
@@ -973,12 +975,13 @@ function normalize(d){
   s.dream = typeof d.dream === "string" ? d.dream : ""; s.sound = d.sound !== false;
   return s;
 }
+let dirty = false, saveSeq = 0;
 function save(){
   const json = JSON.stringify(state); lastJSON = json;
   try { localStorage.setItem(LS, json); } catch(e) {}
   if (!docRef) return;
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => docRef.set(JSON.parse(json)).then(() => setSync("Synced to your account")).catch(e => setSync("Couldn't sync (" + (e && e.code || "error") + "). Saved in this browser.")), 400);
+  clearTimeout(saveTimer); dirty = true; const my = ++saveSeq;
+  saveTimer = setTimeout(() => docRef.set(JSON.parse(lastJSON)).then(() => setSync("Synced to your account")).catch(e => setSync("Couldn't sync (" + (e && e.code || "error") + "). Saved in this browser.")).finally(() => { if (my === saveSeq) dirty = false; }), 400);
 }
 const setSync = t => { $("sync").textContent = t; };
 try { const raw = localStorage.getItem(LS); if (raw) state = normalize(JSON.parse(raw)); } catch(e) {}
@@ -1023,7 +1026,7 @@ async function connect(){
   if (!db){ setSync("Saved in this browser only. Sign in to sync across devices."); return; }
   docRef = db.doc("ledger/main"); let first = true;
   docRef.onSnapshot(snap => {
-    if (snap.metadata && snap.metadata.hasPendingWrites) return;
+    if ((snap.metadata && snap.metadata.hasPendingWrites) || dirty) return;
     if (!snap.exists){ if (first) save(); first = false; setSync("Synced to your account"); render(); return; }
     const inc = normalize(snap.data()), json = JSON.stringify(inc);
     if (json !== lastJSON){ state = inc; lastJSON = json; if (accrue()) save(); try{localStorage.setItem(LS,JSON.stringify(state));}catch(e){} render(); }
@@ -1083,7 +1086,9 @@ function complete(id, el){
   state.daily.count++;
   let bonus = false;
   if (state.daily.count >= DAILY_GOAL && !state.daily.paid){ state.daily.paid = true; state.checking += DAILY_BONUS; state.totalEarned += DAILY_BONUS; log("bonus", "Daily goal bonus", DAILY_BONUS, "chk"); bonus = true; }
-  save(); render(); bump(); sfx("cash");
+  save(); bump(); sfx("cash");
+  const row = el && el.closest && el.closest(".task");
+  if (row && !RM){ row.classList.add("done", "leaving"); setTimeout(render, 500); } else render();
   const [x, y] = at(el); coins(x, y, p.amt >= PAY.big ? 90 : 40); floatText(x, y, "+" + short(p.amt));
   toast("Deposited " + money(p.amt) + (garn ? " · " + money(garn) + " went to your past-due card" : p.why ? " · " + p.why : ""), () => restore(before));
   if (bonus) setTimeout(() => { banner("Daily goal hit <span>+" + short(DAILY_BONUS) + "</span>"); coins(innerWidth/2, 120, 60); }, 600);
@@ -1328,8 +1333,7 @@ function renderTasks(){
   for (const [k, label, f] of groups){ const items = open.filter(f).sort((a,b) => urg(a) - urg(b)); if (!items.length) continue;
     h += `<div class="group"><div class="gh ${k}"><h3>${label}</h3><span class="c num">${items.length} · ${short(items.reduce((s,t) => s + payoutFor(t).amt, 0))} pending</span></div><div class="card">${items.map(taskRow).join("")}</div></div>`; }
   if (!open.length) h += `<div class="card empty group">${state.tasks.length ? "All caught up. Add the next thing above." : "No tasks yet. Add one above to start earning."}</div>`;
-  const wasOpen = document.querySelector("details.done")?.open;
-  if (done.length) h += `<details class="done"${wasOpen ? " open" : ""}><summary>Completed (${done.length})</summary><div class="card">${done.map(taskRow).join("")}</div></details>`;
+  if (done.length) h += `<details class="done"><summary>Show completed (${done.length})</summary><div class="card">${done.slice(0, 30).map(taskRow).join("")}</div><div class="row" style="margin-top:10px"><button class="btn sm ghost" data-act="clearDone">Clear completed</button><span class="lbl">Removes them from the list. Your money stays.</span></div></details>`;
   $("taskList").innerHTML = h;
 }
 
@@ -1446,6 +1450,7 @@ document.addEventListener("click", e => {
   switch (b.dataset.act){
     case "done": complete(id, b); break;
     case "del": remove(id); break;
+    case "clearDone": { const before = snap(), n = state.tasks.filter(t => t.done).length; state.tasks = state.tasks.filter(t => !t.done); save(); render(); toast("Cleared " + n + " completed task" + (n === 1 ? "" : "s"), () => restore(before)); break; }
     case "buy": sheet = null; openBuySheet(id); break;
     case "pick": sheet.src = b.dataset.src; if (sheet.kind === "buy") openBuySheet(sheet.id); else openModPay(sheet.key, sheet.src); break;
     case "confirmBuy": doBuy(sheet.id, sheet.src); break;
